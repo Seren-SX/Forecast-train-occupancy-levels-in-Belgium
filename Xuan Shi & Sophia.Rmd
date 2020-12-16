@@ -1,0 +1,912 @@
+---
+title: "Forecast train occupancy levels in Belgium"
+author: "Seren Xuan Shi"
+date: "12/15/2020"
+output: 
+ html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    theme: united
+    code_folding: hide
+---
+# 1. Introduction (Motivation) 
+
+On dense railway networks –such as in Belgium– train travelers are frequently confronted with overly occupied trains, especially during peak hours. Crowdedness on trains leads to a deterioration in the quality of service and has a negative impact on the well-being of the passenger. In order to reasonably arrange the occupancy of the train and to maximize cost and efficiency for train operators in Belgium, our project wants to show an occupancy indicator in their route planning applications by the means of predictive modeling.
+
+This app stock data from previous trips and weather patterns to predict train occupancy. This is important for transportation planners as they can run lines more efficiently, knowing what kind of demand exists for certain connections origins and destinations train track is developed first for the transportation planner and then for the commuter. The app will gather real time data about train location, as well as estimate occupancy using our algorithm, the algorithm will inform the planner on which routes to increase or decrease and relay that information to the commuter, who will see how crowded or empty a train is something very important during a pandemic. 
+
+That will be created by the transportation service and they will have records of their route use weather delays in profit margins, the company can use GPS monitors on their trains to provide live updates on where their trains are located, which can be relayed to the commuter basing portion of the app users will create real time information by reporting problems with service through a report problem button, within the app interface the commuter would be able to choose from an alphabetized drop down menu displaying the origin and destination. They can favorite their most use route for easier use when the trip is decided the user will get up to date GPS location of the train and estimated time of arrival as well as an estimated occupancy rate based on the models algorithm, and the planners allocation. The best model will be established using a cost benefit analysis to understand occupancy predictions and maximize cost efficiency. This model will correlate accuracy between low, medium and high occupancy. The model that most accurately predicts low and medium occupancy will be implemented as this will help planners consolidate lines and maximize profit and efficiency. 
+
+Here is the link to our project's youtube video! https://youtu.be/yt1P26ML7sQ
+
+Below are some packages to be loaded as well as functions to be set up.
+
+```{r set up, echo = TRUE, results = FALSE, message=FALSE, warning=FALSE}
+
+require(foreign)
+require(nnet)
+require(ggplot2)
+require(reshape2)
+library(lubridate)
+library(dplyr)
+library(sf)
+library(tidyverse)
+library(tidyr)
+library(lubridate)
+library(ggmap)
+library(stplanr)
+library(tmap)
+library(caret)
+library(stringr)
+library(viridis)
+require(gridExtra)
+library(kableExtra)
+library(forestmangr)
+library(MASS)
+library(ggmap)
+library(data.table)
+library(gganimate)
+library (mapview)
+library(tigris)
+library(riem)
+library(gifski)
+
+
+options(scipen=99)
+        
+mapTheme <- theme(plot.title =element_text(size=12),
+                  plot.subtitle = element_text(size=8),
+                  plot.caption = element_text(size = 6),
+                  axis.line=element_blank(),
+                  axis.text.x=element_blank(),
+                  axis.text.y=element_blank(),
+                  axis.ticks=element_blank(),
+                  axis.title.x=element_blank(),
+                  axis.title.y=element_blank(),
+                  panel.background=element_blank(),
+                  panel.border=element_blank(),
+                  panel.grid.major=element_line(colour = 'transparent'),
+                  panel.grid.minor=element_blank(),
+                  legend.direction = "vertical", 
+                  legend.position = "right",
+                  plot.margin = margin(1, 1, 1, 1, 'cm'),
+                  legend.key.height = unit(1, "cm"), legend.key.width = unit(0.2, "cm"))
+
+plotTheme <- theme(
+  plot.title =element_text(size=12),
+  plot.subtitle = element_text(size=8),
+  plot.caption = element_text(size = 6),
+  axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 10),
+  axis.title.y = element_text(size = 10),
+  # Set the entire chart region to blank
+  panel.background=element_blank(),
+  plot.background=element_blank(),
+  #panel.border=element_rect(colour="#F0F0F0"),
+  # Format the grid
+  panel.grid.major=element_line(colour="#D0D0D0",size=.2),
+  axis.ticks=element_blank())
+
+
+options(scipen=50, digits=10)
+
+Sys.setenv(LANGUAGE = "en")
+
+setwd("E:\\MUSA508\\Final")
+
+
+```
+# 2. Data Collection 
+
+The data we used in this project is based in Belgium and will be applicable to all train lines across the country to create an efficient national train system to help improve commuter satisfaction. 
+
+We downloaded the following data from the provided Kaggle dataset:
+-Train Stations data
+-Railway data
+-Lines information data
+-Trains data
+
+```{r Data Collection1, echo = TRUE, results = FALSE, message=FALSE, warning=FALSE}
+stations <- read.csv("stations.csv")%>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
+  mutate(station_id = as.numeric(str_sub(URI, 31, 39)))%>%
+    dplyr::select(-alternative.fr,-alternative.nl,-alternative.de, -alternative.en, -country.code, -URI)
+# mapview(list(stations),cex =3,alpha = 0,col.regions = viridis(1))
+
+rail <- st_read("E:/MUSA508/Final/belgium-railways-shape/railways.shp")%>%
+  filter(type=="rail")
+# mapview(rail)
+
+
+line <- st_read("line_info.csv")
+
+trains <- 
+  read.csv("trains_train.csv") %>%
+  mutate(from = as.numeric(as.character(from)),
+  to = as.numeric(as.character(to))) %>%
+  left_join(dplyr::select(stations, station_id, avg_stop_times,name), by = c("from" = "station_id")) %>%
+  st_sf() %>% mutate(from.X = st_coordinates(.)[,1], 
+  from.Y = st_coordinates(.)[,2]) %>%
+  st_drop_geometry() %>%
+  left_join(dplyr::select(stations, station_id, avg_stop_times), by = c("to" = "station_id")) %>%
+  st_sf() %>% mutate(to.X = st_coordinates(.)[,1], 
+  to.Y = st_coordinates(.)[,2]) %>%
+  st_drop_geometry() %>%
+  mutate(distance = sqrt((from.X - to.X)^2 + (from.Y - to.Y)^2),
+         stop_times_from = avg_stop_times.x,
+         stop_times_to = avg_stop_times.y,) %>%
+    dplyr::select(-avg_stop_times.x, -avg_stop_times.y)%>%
+  arrange(-distance)
+
+
+trains$occ2 <- ordered(trains$occupancy,levels = c("low", "medium", "high"))
+trains$OD <- paste (trains$from, trains$to, sep= "-")
+trains$date_time <- paste(trains$date, trains$time)
+trains$date_time <- parse_date_time(trains$date_time, "ymd %I:%M:%S %p") 
+
+
+trains <- 
+    trains %>%
+    mutate(veh = substr(vehicle,1,1),
+          interval60 = floor_date(ymd_hms(date_time), unit = "hour"),
+           interval15 = floor_date(ymd_hms(date_time), unit = "15 mins"),
+           week = week(interval60),
+           dotw = wday(interval60),
+           veh = substr(vehicle,1,1))
+  
+trains <- 
+    trains %>%
+    mutate(veh = substr(vehicle,1,1),
+          interval60 = floor_date(ymd_hms(date_time), unit = "hour"),
+           interval15 = floor_date(ymd_hms(date_time), unit = "15 mins"),
+           week = week(interval60),
+          # dotw = wday(interval60),
+           veh = substr(vehicle,1,1),
+           hour = as.numeric(substr(date_time, 12, 13)),
+           weekend = ifelse(dotw == "6" | dotw == "7",1,0),
+          mor.jam = ifelse(hour>= 6 & hour<=10 & weekend == "0",1,0),
+          eve.jam = ifelse(hour>= 15 & hour<= 19 & weekend == "0",1,0),
+          hour = factor(hour),
+          weekend = factor(weekend),
+          mor.jam = factor(mor.jam),
+          eve.jam = factor(eve.jam),
+          from = factor(from),
+          dotw = factor(wday(date_time)),
+          to = factor (to))
+```
+We also include other data to enrich our model:
+-Weather data
+-Facility data
+
+```{r Data Collection2,echo = TRUE, results = FALSE, message=FALSE, warning=FALSE}
+
+weather_july1 <- read.csv("E:/MUSA508/Final/KaggleTrainOccupancy-master/weather_data_july_1.csv")
+weather_july2 <- read.csv("E:/MUSA508/Final/KaggleTrainOccupancy-master/weather_data_july_2.csv")
+weather_aug1 <- read.csv("E:/MUSA508/Final/KaggleTrainOccupancy-master/weather_data_aug_1.csv")
+weather_aug2 <- read.csv("E:/MUSA508/Final/KaggleTrainOccupancy-master/weather_data_aug_2.csv")
+weather_sep1 <- read.csv("E:/MUSA508/Final/KaggleTrainOccupancy-master/weather_data_sep_1.csv")
+weather_sep2 <- read.csv("E:/MUSA508/Final/KaggleTrainOccupancy-master/weather_data_sep_2.csv")
+weather_oct1 <- read.csv("E:/MUSA508/Final/KaggleTrainOccupancy-master/weather_data_oct_1.csv")
+weather_oct2 <- read.csv("E:/MUSA508/Final/KaggleTrainOccupancy-master/weather_data_oct_2.csv")
+
+weather1 <- 
+    mutate(weather_july1, interval60 = ymd_h(substr(date_time,1,13))) %>%
+    mutate(week = week(interval60),
+           dotw = wday(interval60)) %>%
+    group_by(interval60,station_name) %>%
+    dplyr::summarize(Temperature = max(temperature),
+              Humidity = max(humidity),
+              Wind_Speed = max(windspeed),
+              Visibility = max(visibility))
+weather2 <- 
+    mutate(weather_july2, interval60 = ymd_h(substr(date_time,1,13))) %>%
+    mutate(week = week(interval60),
+           dotw = wday(interval60)) %>%
+    group_by(interval60,station_name) %>%
+    dplyr::summarize(Temperature = max(temperature),
+              Humidity = max(humidity),
+              Wind_Speed = max(windspeed),
+              Visibility = max(visibility))
+weather3 <- 
+    mutate(weather_aug1, interval60 = ymd_h(substr(date_time,1,13))) %>%
+    mutate(week = week(interval60),
+           dotw = wday(interval60)) %>%
+    group_by(interval60,station_name) %>%
+    dplyr::summarize(Temperature = max(temperature),
+              Humidity = max(humidity),
+              Wind_Speed = max(windspeed),
+              Visibility = max(visibility))
+weather4 <- 
+    mutate(weather_aug2, interval60 = ymd_h(substr(date_time,1,13))) %>%
+    mutate(week = week(interval60),
+           dotw = wday(interval60)) %>%
+    group_by(interval60,station_name) %>%
+    dplyr::summarize(Temperature = max(temperature),
+              Humidity = max(humidity),
+              Wind_Speed = max(windspeed),
+              Visibility = max(visibility))
+weather5 <- 
+    mutate(weather_sep1, interval60 = ymd_h(substr(date_time,1,13))) %>%
+    mutate(week = week(interval60),
+           dotw = wday(interval60)) %>%
+    group_by(interval60,station_name) %>%
+    dplyr::summarize(Temperature = max(temperature),
+              Humidity = max(humidity),
+              Wind_Speed = max(windspeed),
+              Visibility = max(visibility))
+weather6 <- 
+    mutate(weather_sep2, interval60 = ymd_h(substr(date_time,1,13))) %>%
+    mutate(week = week(interval60),
+           dotw = wday(interval60)) %>%
+    group_by(interval60,station_name) %>%
+    dplyr::summarize(Temperature = max(temperature),
+              Humidity = max(humidity),
+              Wind_Speed = max(windspeed),
+              Visibility = max(visibility))
+weather7 <- 
+    mutate(weather_oct1, interval60 = ymd_h(substr(date_time,1,13))) %>%
+    mutate(week = week(interval60),
+           dotw = wday(interval60)) %>%
+    group_by(interval60,station_name) %>%
+    dplyr::summarize(Temperature = max(temperature),
+              Humidity = max(humidity),
+              Wind_Speed = max(windspeed),
+              Visibility = max(visibility))
+weather8 <- 
+    mutate(weather_oct2, interval60 = ymd_h(substr(date_time,1,13))) %>%
+    mutate(week = week(interval60),
+           dotw = wday(interval60)) %>%
+    group_by(interval60,station_name) %>%
+    dplyr::summarize(Temperature = max(temperature),
+              Humidity = max(humidity),
+              Wind_Speed = max(windspeed),
+              Visibility = max(visibility))
+
+weather1$station_date <- paste (weather1$station_name, weather1$interval60, sep= "-")
+weather2$station_date <- paste (weather2$station_name, weather2$interval60, sep= "-")
+weather3$station_date <- paste (weather3$station_name, weather3$interval60, sep= "-")
+weather4$station_date <- paste (weather4$station_name, weather4$interval60, sep= "-")
+weather5$station_date <- paste (weather5$station_name, weather5$interval60, sep= "-")
+weather6$station_date <- paste (weather6$station_name, weather6$interval60, sep= "-")
+weather7$station_date <- paste (weather7$station_name, weather7$interval60, sep= "-")
+weather8$station_date <- paste (weather8$station_name, weather8$interval60, sep= "-")
+
+weather <- rbind(weather1,weather2,weather3,weather4,weather5,weather6,weather7,weather8)
+
+trains$station_date <- paste (trains$name, trains$interval60, sep= "-")
+
+trains <- merge(x=trains,y=weather[,c("station_date","Temperature","Humidity","Wind_Speed","Visibility")], by = "station_date", all.x=TRUE)
+
+trains$Temperature[is.na(trains$Temperature)] <- 0
+trains$Humidity[is.na(trains$Humidity)] <- 0
+trains$Wind_Speed[is.na(trains$Wind_Speed)] <- 0
+trains$Visibility[is.na(trains$Visibility)] <- 0
+```
+
+```{r Data Collection3,echo = TRUE, results = FALSE, message=FALSE, warning=FALSE}
+facility<-read_csv("E:\\MUSA508\\Final\\stations-master\\stations-master\\facilities.csv")
+
+facility[is.na(facility)] <- 0
+
+facility <- 
+  facility %>% 
+  mutate(facility_sum = dplyr::select(.,ticket_vending_machine:audio_induction_loop) %>% 
+           rowSums())
+facility <- 
+  facility %>% 
+  dplyr::select(name,facility_sum)
+
+stations <- merge(stations,facility,by="name",all.x=T,all.y=F)
+stations[is.na(stations)] <- 0
+
+```
+
+# 3. Exploratory analysis 
+
+To create the best model we began by plotting the points of the train station that make up the data set to begin to understand that geographic location and their connection to other train stations. 
+
+We also part of the train line to understand the connection between different stations and the occupancy rate for different lines. We found that most ships are medium and low occupancy in yellow and pink respectively. It's important for planners to know which connections have higher low occupancy. Because will ultimately determine how change will be allocated to coincide with rider demand. 
+
+
+
+```{r stplanr OD line, echo = TRUE, results = FALSE, message=FALSE, warning=FALSE}
+
+ggplot() +
+  geom_sf(data=rail, inherit.aes = FALSE,na.rm=T, col="grey", lwd=1.8 )+
+  geom_sf(data=stations, size = 1,inherit.aes = FALSE)+
+   ylim(min(49.5), max(51.5))+ #lat
+  xlim(min(2.5), max(6.1))+
+    labs(title="Train Stations in Belgium") 
+
+new_t <- trains%>%
+  mutate(new = 1)%>%
+  dplyr::select(OD, new)%>%
+  group_by(OD) %>%
+  summarise( count = sum (new))
+
+new_t <- separate(new_t,OD,into=c("from","to"), sep="-")
+new_t <- subset(new_t, new_t$to!="1000000" & new_t$from!="1000000" & new_t$to!="0" & !is.na(new_t$to) & !is.na(new_t$from) & new_t$to!="NA" & new_t$from!="NA")
+
+new_t <- subset(new_t, new_t$to!=new_t$from)
+new_t$from <- as.numeric(as.character(new_t$from))
+new_t$to <- as.numeric(new_t$to)
+
+station_extract <- stations%>%
+  mutate(to = station_id)%>%
+  dplyr::select(to)
+
+z <- station_extract
+l <- od2line(flow = new_t, zones = z)
+l$OD <-  paste (l$from, l$to, sep= "-")
+try <- merge(l,trains, by = "OD", all.x=T, all.y=F)
+
+ggplot(try)+
+  geom_sf(data=rail, inherit.aes = FALSE,na.rm=T, col="grey", lwd=1.8 )+
+geom_sf(data=stations, size = 1,inherit.aes = FALSE)+
+geom_sf(data=try, aes(color = occupancy), alpha=0.5,inherit.aes = FALSE, lwd = 1)+
+  scale_color_viridis(discrete=TRUE, option = "C") +
+#geom_sf(stat_order_sf,aes(color = vehicle_id), size=0.3)+
+ # theme(legend.position="none")+
+   ylim(min(49.5), max(51.5))+ #lat
+  xlim(min(2.5), max(6.1))+ #long
+  labs(title="OD lines of Train Shifts in Belgium,2016")
+
+train_sf <- merge(l[,c("geometry","OD")], trains, by = "OD", alll=T)
+```
+
+We then have other data to understand different weather patterns, which might influence train delays and occupancy. The different weather variables include precipitation temperature wind speed and visibility. All of the weather related data was then advocated to give a clear understanding of weather patterns throughout the year, a variable which may influence rider occupancy. 
+
+```{r fig.height=8 ,echo = TRUE, results = FALSE, message=FALSE, warning=FALSE}
+grid.arrange(
+  ggplot(trains, aes(interval60,Humidity)) + geom_line() +
+    labs(title="Percipitation", x="Hour", y="Perecipitation") + plotTheme,
+  ggplot(trains, aes(interval60,Wind_Speed)) + geom_line() +
+    labs(title="Wind Speed", x="Hour", y="Wind_Speed") + plotTheme,
+  ggplot(trains, aes(interval60,Temperature)) + geom_line() +  #B1339E
+    labs(title="Temperature", x="Hour", y="Temperature") + plotTheme,
+ ggplot(trains, aes(interval60,Visibility)) + geom_line() +
+    labs(title="Visibility", x="Hour", y="Visibility") + plotTheme,  
+ ncol = 1,
+  top="Weather Data Belgium, 2016")
+```
+
+```{r echo = TRUE, results = FALSE, message=FALSE, warning=FALSE}
+  
+ggplot() +
+
+  geom_sf(data=rail, inherit.aes = FALSE,na.rm=T, col="grey", lwd=1.8 )+
+  geom_sf(data=stations, size = 1,inherit.aes = FALSE)+
+  geom_sf(data = stations,aes(size= facility_sum,col= I('#A3319F')),alpha=0.5)+
+   ylim(min(49.5), max(51.5))+ #lat
+  xlim(min(2.5), max(6.1))+
+    labs(title="Number of Station Facilities, Belgium") 
+```
+And we broke up train data into a couple of different space time variables such as train occupancy count by hour and visibility by hour to see what variables may play a role in predicting train occupancy occupancy was all around on the weekends, but experienced high rates on weekdays at rush hour during 9am and 5pm further exploration between time occupancy and weather will better inform the final model used to most accurately predict train occupancy. 
+
+
+```{r echo = TRUE, results = FALSE, message=FALSE, warning=FALSE}
+
+ggplot(trains %>%
+         group_by(interval60) %>%
+         tally())+
+  geom_line(aes(x = interval60, y = n))+
+  labs(title="Train Shifts in Belgium, per hour, 2016",
+       x="Date", 
+       y="Number of trips")+
+  plotTheme
+
+ggplot(trains %>% 
+         mutate(hour = hour(interval60)) %>% 
+         filter(occ2 == "high" | occ2 == "medium" | occ2 == "low"), aes(hour, color = dotw))+
+  geom_freqpoly(binwidth = 1)+
+  scale_color_viridis(discrete=TRUE, option = "C") +
+  facet_wrap(~occ2,ncol=3) +
+  labs(title="Train Shifts in Belgium, by day of the week, 2016") +
+  plotTheme
+
+ggplot(trains %>% mutate(hour = hour(interval60)))+
+     geom_freqpoly(aes(hour, color = occ2), binwidth = 1)+
+  scale_color_viridis(discrete=TRUE, option = "C") +
+  labs(title="Number of Train Shifts in Belgium, by occupancy, 2016",
+       x="Hour", 
+       y="Trip Counts")+
+     plotTheme
+
+ggplot(trains %>% 
+         mutate(hour = hour(interval15),
+                weekend = ifelse(dotw %in% c("6", "7"), "Weekend", "Weekday")))+
+     geom_freqpoly(aes(hour, color = weekend), binwidth = 1)+
+  scale_color_viridis(discrete=TRUE, option = "C") +
+  labs(title="Train Shifts in Belgium - weekend vs weekday, 2016",
+       x="Hour", 
+       y="Trip Counts")+
+     plotTheme
+
+
+ggplot(trains %>% 
+         mutate(hour = hour(interval60)) %>% 
+         filter(occ2 == "high" | occ2 == "medium" | occ2 == "low"), aes(Visibility, color = dotw))+
+  geom_freqpoly(binwidth = 1)+
+  scale_color_viridis(discrete=TRUE, option = "C") +
+  facet_wrap(~occupancy,ncol=3) +
+  labs(title="Visibility and Train Shifts relationship in Belgium, by day of the week, 2016") 
+
+ggplot(trains %>% 
+         mutate(hour = hour(interval60)) %>% 
+         filter(occ2 == "high" | occ2 == "medium" | occ2 == "low"), aes(Temperature, color = dotw))+
+  geom_freqpoly(binwidth = 1)+
+  scale_color_viridis(discrete=TRUE, option = "C") +
+  facet_wrap(~occupancy,ncol=3) 
+  labs(title="Temperature and Train Shifts relationship in Belgium, by day of the week, 2016")
+
+ggplot(trains %>% 
+         mutate(hour = hour(interval60)) %>% 
+         filter(occ2 == "high" | occ2 == "medium" | occ2 == "low"), aes(Humidity, color = dotw))+
+  geom_freqpoly(binwidth = 1)+
+  scale_color_viridis(discrete=TRUE, option = "C") +
+  facet_wrap(~occupancy,ncol=3) +
+  labs(title="Humidity and Train Shifts relationship in Belgium, by day of the week, 2016") 
+
+ggplot(trains %>% 
+         mutate(hour = hour(interval60)) %>% 
+         filter(occ2 == "high" | occ2 == "medium" | occ2 == "low"), aes(Wind_Speed, color = dotw))+
+  geom_freqpoly(binwidth = 1)+
+   scale_color_viridis(discrete=TRUE, option = "C") +
+  facet_wrap(~occupancy,ncol=3) +
+  labs(title="Wind Speed and Train Shifts relationship in Belgium, by day of the week, 2016") 
+```
+
+# 4. Spatial Process 
+In this section we analysis the relationship between the occupancy level and the trips characteristic.
+
+-OD pairs and the occupancy level
+
+```{r OD,fig.height=8, echo = TRUE, results = TRUE, message=FALSE, warning=FALSE}
+
+occ_OD <- trains%>%
+  group_by(OD)%>%
+   count(occ2)%>%
+    mutate(count = n)%>%
+   dplyr::select(-n) 
+occ_OD_df <- as.data.frame(occ_OD)
+head(occ_OD[order(-occ_OD_df$count),],10)
+
+
+l2 <- merge(l, occ_OD, by="OD", all.x=TRUE)
+
+
+l2$occ2 <- factor(l2$occ2, level=c("low","medium","high"))
+train_sf$OD_occ <- factor(ifelse(train_sf$OD %in% occ_OD$OD, train_sf$OD, "1"))
+```
+
+
+-Start station and the occupancy level 
+```{r start,echo = TRUE, results = TRUE, message=FALSE, warning=FALSE}
+
+occ_from <- trains%>%
+  group_by(from)%>%
+   count(occ2)%>%
+  mutate(count = n,
+         station_id= from)%>%
+  dplyr::select(-n) 
+
+#merge with sf
+stations <- stations%>%
+  mutate(Geom = gsub('[(c)°]', '', geometry)) %>% 
+  separate(col = Geom, into = c('lat', 'lon'), sep = '\\,')
+occ_from <- merge(stations["station_id"], occ_from, by= "station_id",all.y=T)
+occ_from_df <- as.data.frame(occ_from)%>%
+  dplyr::select(-geometry)%>%
+  round_df(3)
+head(occ_from_df[order( -occ_from_df$count),],10)
+```
+
+-End station and the occupancy level 
+```{r ens,  fig.height=8,echo = TRUE, results = TRUE, message=FALSE, warning=FALSE}
+
+occ_to <- trains%>%
+  group_by(to)%>%
+   count(occ2)%>%
+  mutate(count = n,
+         station_id= to)%>%
+  dplyr::select(-n) 
+
+#merge with sf 
+occ_to <- merge(stations[c("geometry","station_id")], occ_to, by= "station_id",all.y=T)
+
+occ_to_df <- as.data.frame(occ_to)%>%
+  dplyr::select(-geometry)%>%
+  round_df(3)
+head(occ_to_df[order( -occ_to_df$count),],10)
+
+```
+
+-Vehicle and the occupancy level 
+```{r occ with veh1}
+occ_veh <- trains%>%
+  group_by(vehicle)%>%
+   count(vehicle)%>%
+  mutate(count = n)%>%
+dplyr::select(-n)
+occ_veh_df <- as.data.frame(occ_veh)%>%
+  round_df(3)
+head(occ_veh_df[order( -occ_veh_df$count),],10)
+```
+```{r occ with veh2,  fig.height=8,echo = TRUE, results = TRUE, message=FALSE, warning=FALSE}
+
+trains_to <- merge(trains, stations,  by.x = "to", by.y = "station_id") %>%
+   st_as_sf()
+
+trains_from <- merge(trains, stations,  by.x = "from", by.y = "station_id") %>%
+   st_as_sf()
+
+sort(summary(trains_to$vehicle,maxsum=1500),decreasing = TRUE)
+sort(summary(trains_from$vehicle,maxsum=1500),decreasing = TRUE)
+
+top_10=c("IC1518","IC429","IC1515","IC407","IC736","P7305","IC1807","IC3631","1828","8015")
+
+
+p=ggplot()+
+  geom_sf(data=rail,colour = "grey",lwd=1.8)+
+  geom_sf(data=stations, size = 1.5,colour = "grey30",inherit.aes = FALSE)+
+  geom_sf(data=subset(trains_from, trains_from$vehicle %in% top_10),aes(colour = vehicle),size=3,show.legend = "point")+ 
+  scale_color_viridis(discrete=TRUE, option = "C") +
+  labs(title="Top 10 Frequent Lines Plotted to the Start Stations")+
+  theme(legend.position = "bottom") + transition_manual(factor(vehicle, levels = top_10), cumulative = TRUE)+
+  ylim(min(49.5), max(51.5))+ #lat
+  xlim(min(2.5), max(6.1))
+
+animate(p,duration=10)
+
+
+
+p=ggplot()+
+  geom_sf(data=rail,colour = "grey",lwd=1.8)+
+  geom_sf(data=stations, size = 1.5,colour = "grey30",inherit.aes = FALSE)+
+  geom_sf(data=subset(trains_to, trains_to$vehicle %in% top_10),aes(colour = vehicle),size=3,show.legend = "point")+ 
+  scale_color_viridis(discrete=TRUE, option = "C") +
+  labs(title="Top 10 Frequent Lines Plotted to the End Stations")+
+  theme(legend.position = "bottom") + transition_manual(factor(vehicle, levels = top_10), cumulative = TRUE)+
+  ylim(min(49.5), max(51.5))+ #lat
+  xlim(min(2.5), max(6.1))
+
+animate(p,duration=10)
+
+```
+
+```{r clean station order, echo = TRUE, results = TRUE, message=FALSE, warning=FALSE}
+#seperate and clean staion
+line$nr_of_stops <- as.numeric(as.character(line$nr_of_stops))
+sep_stat_line <- as.data.frame(str_split_fixed(line$stopping_station_ids, ",",34))
+
+sep_stat_line <- sep_stat_line %>%
+  mutate_all(funs(gsub("'", "", .)))%>%
+  mutate_all(funs(gsub("]", "", .)))%>%
+  mutate(V1 = substr(V1, 2, 10))
+
+# join station with line info
+sep_stat_line <- cbind(line,sep_stat_line)
+sep_stat_line <- 
+  sep_stat_line%>%
+  dplyr::select(-Unnamed..0, -Unnamed..0.1)
+
+# wide to long
+v_stat_line <- reshape(sep_stat_line,
+                       varying=c(6:39), 
+                       timevar = "Order",
+                       idvar=c("vehicle_id"),
+                       v.names="station_id",
+                       direction="long")
+v_stat_line <- v_stat_line%>%mutate_all(funs(gsub(" ", "", .)))%>%
+  mutate(station_id = substr(station_id,3,9))%>%
+  filter(station_id!="")%>%
+  dplyr::select(-stopping_station_ids)
+
+# add geomtry to each station
+stat_order_sf <- merge(stations[c("avg_stop_times", "station_id","geometry")], v_stat_line, by = "station_id",all=T)
+
+# if the % of certain type of occupancy is larger than 0.75 (and count >=5), then 1,  otherwise 0 
+stat_order_sf$occ_veh<- ifelse(stat_order_sf$vehicle_id %in% occ_veh$vehicle_id,1,0)
+
+# only select the stations exist in trains 
+stat_order_sf <- subset(stat_order_sf, stat_order_sf$station_id %in% trains$from | stat_order_sf$station_id %in% trains$to)
+
+# merge occupancy into station order_sf
+veh_sf <- merge(stat_order_sf,occ_veh, by.x = "vehicle_id",by.y = "vehicle", all.x=T)
+
+
+train_sf<-merge(trains,train_sf,all=F)
+train_sf<-merge(train_sf, stations,by.x ="from" , by.y = "station_id")
+train_sf$vehicle <- as.character(train_sf$vehicle)
+train_sf$veh_occ <- as.factor(ifelse(train_sf$vehicle %in% occ_veh$vehicle, train_sf$vehicle, "1"))
+
+```
+
+# 4. Modeling 
+
+We uses Multinomial Logistic Regression to train the model. There are three occupancy outcomes, low, medium and high, so we are going to have a three-way confusion matrix.
+
+```{r split, echo = TRUE, results = TRUE, message=FALSE, warning=FALSE}
+train_sf$veh <- as.factor(train_sf$veh)
+train_sf$week <- as.factor(train_sf$week)
+
+set.seed(0415)
+trainIndex <- createDataPartition(
+              y = paste(train_sf$occ2, train_sf$to, train_sf$veh_occ,  train_sf$OD_occ, train_sf$from, train_sf$dowt, p = .75),
+              list = FALSE,
+              times = 1)
+yTrain <- train_sf[ trainIndex,]
+yTest  <- train_sf[-trainIndex,]
+
+m1 <- multinom(occ2 ~  week + dotw + veh + hour  + mor.jam + eve.jam + distance + from + to + OD_occ + veh_occ + stop_times_from + stop_times_to + Temperature + Humidity + Wind_Speed+Visibility, data = yTrain, MaxNWts =10000000)
+
+
+testProbs <- data.frame(Observe = as.factor(yTest$occ2),
+                        Predict = predict(m1, newdata=yTest, "class"),
+                 pre = predict(m1, newdata=yTest, "probs"),
+                 from = yTest$from,
+                 to = yTest$to,
+                 OD = yTest$OD,
+                 week = yTest$week,
+                 hour = yTest$hour,
+                 interval60 = yTest$interval60,
+                 date = yTest$date)
+testProbs <- merge(l[c("geometry","OD")], testProbs, by="OD", all.y=T)
+testProbs <- testProbs[c(7,8,9, 10,11,12,1,2,3,4,5,6,13)]
+testProbs_table <- as.data.frame(testProbs)%>%
+  round_df(3)%>%
+  dplyr::select(from, to, date, Observe, Predict, pre.low, pre.high, pre.medium)
+head(testProbs_table,100)
+
+```
+
+# 5. Goodness of fit 
+## 5.1 Cost benefit analysis 
+
+According to our use case, this software is designed for railway transportation planners, we hope to help them reduce expenditures while optimizing the needs of transportation systems. We classify the nine prediction results to develop a cost benefit analysis.
+
+Multiple models will be run through our state of the cost benefit analysis software to determine which algorithm will best help transportation planners render high profit and efficiency while delivering a pleasant experience for the commuter. We hope that the algorithm and its ability to predict train occupancy will make the train riding experience more attractive to Belgians and more cost efficient for planners.
+
+If we can successfully predict the route, we expect that the optimal algorithm can optimize the total revenue.We are going to make the following assumptions about the Income and Cost of the occupancy prediction change:
+  - We assume the average ticket fee per passenger is €6.
+  - We assume the capacity of each trip is 400 (80*5 coach).
+  - We assume the cost on increasing of capacity or coach is €300.
+  - We assume the about €300, which corresponds to 100 capacity increase.
+  - For highly occupied trips, we assumed 100 additional passengers will get into the train if we increase the capacity of that trip.
+ 
+Based on these assumptions, we have established a profit calculation method for each prediction result and the observed comparison.
+
+Predicted: low - Observed: low           =0-(-300)*count
+Predicted: low  - Observed: medium       =0
+Predicted: low  - Observed: high         =0-300*count
+Predicted: medium  - Observed: low       =0-(-300)*count
+Predicted: medium  - Observed: meidum    =0
+Predicted: medium  - Observed: high      =0-300*count
+Predicted: high  - Observed: low         =-(6*100)-(-300)*count
+Predicted: high  - Observed: medium      =0
+Predicted: high  - Observed: high        =6*100-300*count
+
+
+```{r echo = TRUE, results = TRUE, message=FALSE, warning=FALSE}
+cost_benefit_table <-
+   testProbs_table %>%
+   na.omit() %>%
+      count(Observe, Predict) %>%
+      summarize(Low_Low = sum(n[Observe=='low' & Predict=='low']),
+                Low_Medium = sum(n[Observe=='low' & Predict=='medium']),
+                Low_High = sum(n[Observe=='low' & Predict=='high']),
+                Medium_low = sum(n[Observe=='medium' & Predict=='low']),
+                Medium_Medium = sum(n[Observe=='medium' & Predict=='medium']),
+                Medium_High = sum(n[Observe=='medium' & Predict=='high']),
+                High_Low = sum(n[Observe=='high' & Predict=='low']),
+                High_Medium = sum(n[Observe=='high' & Predict=='medium']),
+                High_High = sum(n[Observe=='high' & Predict=='high']),
+                SUM = sum(n)
+                ) %>%
+       gather(Variable, Count)%>%
+         mutate(Income =
+               ifelse(Variable == "Low_Low", 0,
+               ifelse(Variable == "Low_Medium", 0,
+              ifelse(Variable == "Low_High", 0,
+               ifelse(Variable == "Medium_low", 0,
+              ifelse(Variable == "Medium_Medium", 0,
+                ifelse(Variable == "Medium_High", 0,
+               ifelse(Variable == "High_Low",'-(6*100)',
+               ifelse(Variable == "High_Medium", 0,
+               ifelse(Variable == "High_High", '6*100',
+                      ifelse(Variable == "SUM",(-(6*100)+6*100) ,0))))))))))) %>%
+           mutate(Cost =
+               ifelse(Variable == "Low_Low", -300,
+               ifelse(Variable == "Low_Medium", 0,
+              ifelse(Variable == "Low_High", 300,
+               ifelse(Variable == "Medium_low", -300,
+              ifelse(Variable == "Medium_Medium", 0,
+                ifelse(Variable == "Medium_High", 300,
+               ifelse(Variable == "High_Low",-300,
+               ifelse(Variable == "High_Medium", 0,
+               ifelse(Variable == "High_High", 300,
+                      ifelse(Variable == "SUM", 0,0))))))))))) %>%
+               mutate('Profits/per count'=
+               ifelse(Variable == "Low_Low", 0-(-300),
+               ifelse(Variable == "Low_Medium", 0,
+              ifelse(Variable == "Low_High", -300,
+               ifelse(Variable == "Medium_low", 0-(-300),
+              ifelse(Variable == "Medium_Medium", 0,
+                ifelse(Variable == "Medium_High", 0-(300),
+               ifelse(Variable == "High_Low",-6*100-(-300),
+               ifelse(Variable == "High_Medium", 0,
+               ifelse(Variable == "High_High", 6*100-(300),
+                      ifelse(Variable == "SUM", ((0-(-300))+0-300+(0-(-300))-300+(-6*100-(-300))+6*100-(300)),0))))))))))) %>%
+       mutate('Total_Profits' =
+               ifelse(Variable == "Low_Low", Count * (0-(-300)),
+               ifelse(Variable == "Low_Medium", Count * (0-0),
+              ifelse(Variable == "Low_High", Count * (-(300)),
+               ifelse(Variable == "Medium_low", Count * (0-(-300)),
+              ifelse(Variable == "Medium_Medium", Count * (0-(0)),
+                ifelse(Variable == "Medium_High", Count * (0-(300)),
+               ifelse(Variable == "High_Low",Count*(-6*100-(-300)),
+               ifelse(Variable == "High_Medium", Count*(0-(0)),
+               ifelse(Variable == "High_High", Count*(6*100-(300)),
+                ifelse(Variable == "SUM", '####',0)))))))))))%>%
+    bind_cols(data.frame(Description = c(
+              "Predicted: low - Observed: low",
+              "Predicted: low  - Observed: medium",
+              "Predicted: low  - Observed: high",
+              "Predicted: medium  - Observed: low",
+              "Predicted: medium  - Observed: meidum",
+              "Predicted: medium  - Observed: high",
+              "Predicted: high  - Observed: low",
+              "Predicted: high  - Observed: medium",
+              "Predicted: high  - Observed: high",
+              "Total Profits")))%>%
+  mutate(Observe_Predict=Variable)
+cost_benefit_table <- cost_benefit_table[c(8,2,3,4,5,6,7)]
+cost_benefit_table$Total_Profits <- as.numeric(cost_benefit_table$Total_Profits)
+cost_benefit_table$Total_Profits[cost_benefit_table$Observe_Predict=="SUM"] <- sum(cost_benefit_table$Total_Profits, na.rm=T)
+head(cost_benefit_table,10)
+kable(cost_benefit_table,
+       caption = "Cost/Benefit Table")%>% kable_styling()
+
+```
+
+## 5.2 Accuracy 
+```{r Accuracy, echo = TRUE, results = TRUE, message=FALSE, warning=FALSE}
+caret::confusionMatrix(testProbs$Observe, testProbs$Predict, 
+                       positive = "low")
+
+accu <- as.data.frame(table(testProbs$Observe,testProbs$Predict))%>%
+  mutate(Observe = Var1,
+         Predict = Var2,
+         count = Freq,
+         result_type = paste (Observe, Predict, sep= "-"))%>%
+  dplyr::select(-Var1, -Var2,-Freq,)
+accu$percent <- as.numeric(c("68.7", "16.6", "23.2", "15.6", "62.8", "21.3", "15.6", "20.6","55.5"))
+accu$Predict <- factor(accu$Predict, level=c("low","medium","high"))
+accu$Observe <- factor(accu$Observe, level=c("low","medium","high"))
+
+```
+
+
+## 5.3 Generalizability
+
+Here we consider 5 types of results as error, which are high_low,low_high,medium_high, low_medium,and High_medium, these are prediction types that cause a loss to project's total profits. According to different assumptions, different error types may appear, which need to be adjusted according to the actual situation.
+
+```{r all error, echo = TRUE, results = TRUE, message=FALSE, warning=FALSE}
+main_error <- testProbs%>%
+  mutate(type=paste(Observe, Predict, sep= "-"))%>%
+  filter(type == "low-high"|type == "medium-high"|type == "high-low")%>%
+  mutate(high_m_low = pre.high-pre.low,
+         high_m_med = pre.high-pre.medium,
+         low_m_high = pre.low-pre.high)
+
+high_low <- subset(main_error, main_error$type=="high-low")%>%
+  mutate(error = low_m_high)%>%
+  dplyr::select(-c(15,16,17))
+
+low_high <- subset(main_error, main_error$type=="low-high")%>%
+  mutate(error = high_m_low)%>%
+  dplyr::select(-c(15,16,17))
+
+medium_high <- subset(main_error, main_error$type=="medium-high")%>%
+  mutate(error = high_m_med)%>%
+  dplyr::select(-c(15,16,17))
+
+medium_high <- subset(main_error, main_error$type=="medium-high")%>%
+  mutate(error = high_m_med)%>%
+  dplyr::select(-c(15,16,17))
+
+all_error <- testProbs%>%
+  mutate(type=paste(Observe, Predict, sep= "-"))%>%
+  filter("Observe" != "Predict")
+
+low_medium <- all_error%>%
+  filter(type=="low-medium")%>%
+  mutate(error = pre.medium-pre.low)
+
+High_medium <- all_error%>%
+  filter(type=="high-medium")%>%
+  mutate(error = pre.medium-pre.high)
+  
+all_error <- rbind(high_low,low_high,medium_high, low_medium,High_medium)
+wrong_pred_5_type <- as.data.frame(all_error)%>%
+  dplyr::select(Observe, Predict, pre.low, pre.medium, pre.high, error)%>%
+  round_df(3)
+head(wrong_pred_5_type,10)
+```
+
+
+For spatial error, we analysis the general spatial error and the spatial error of different types.
+
+
+```{r spatial error, echo = TRUE, results = TRUE, message=FALSE, warning=FALSE}
+ggplot(all_error)+
+#geom_sf(data=rail,inherit.aes = FALSE, na.rm=T, col="black", lwd=0.2 ,alpha=0.2)+
+geom_sf(data=stations, size = 1, inherit.aes = FALSE, col="grey" )+
+geom_sf(data=all_error, aes(colour = error),lwd=1)+
+    scale_colour_viridis(direction = -1, discrete = F, option = "C")+
+     #facet_wrap(~type)+
+    ylim(min(49.5), max(51.5))+ #lat
+    xlim(min(2.5), max(6.1))+
+   labs(title="Spatial Error ")
+
+ggplot(all_error)+
+#geom_sf(data=rail,inherit.aes = FALSE, na.rm=T, col="black", lwd=0.2 ,alpha=0.2)+
+geom_sf(data=stations, size = 1, inherit.aes = FALSE, col="grey" )+
+geom_sf(data=all_error, aes(colour = error),lwd=1)+
+    scale_colour_viridis(direction = -1, discrete = F, option = "C")+
+     facet_wrap(~type)+
+    ylim(min(49.5), max(51.5))+ #lat
+    xlim(min(2.5), max(6.1))+
+   labs(title="Spatial Error by 5 types")
+```
+
+For time error, we analysis the general time error and the time error of different types.
+```{r week and hour, echo = TRUE, results = TRUE, message=FALSE, warning=FALSE}
+all_error_df <- as.data.frame(all_error)
+
+grid.arrange(
+all_error %>%
+  filter(interval60>=as.Date("2016-09-15"))%>%
+    ggplot(aes(interval60, error)) + 
+      geom_line(size = 0.5)+
+   labs(title = "Errors by hour")+
+  scale_colour_viridis(direction = -1, discrete = T, option = "C")
+  ,
+all_error %>%
+  filter(interval60>=as.Date("2016-09-15"))%>%
+    ggplot(aes(interval60, error, colour=type)) + 
+      geom_line(size = 0.5)+
+  labs(title = "Errors by 5 error types and hour")+
+  scale_colour_viridis(direction = -1, discrete = T, option = "C"),
+ncol=1)
+
+
+grid.arrange(
+  all_error %>%
+  filter(week=="38"|week=="39"|week=="40"|week=="41"|week=="42"|week=="43")%>%
+  ggplot(aes(x=week, y=error)) + 
+    geom_bar(position = "dodge", stat="identity") +
+     scale_fill_manual(values =plasma(1))+
+    labs(title = "Errors by week"),
+  
+all_error %>%
+  filter(week=="38"|week=="39"|week=="40"|week=="41"|week=="42"|week=="43")%>%
+  ggplot(aes(x=week, y=error)) + 
+    geom_bar(aes(fill = type), position = "dodge", stat="identity") +
+     scale_fill_manual(values = plasma(5)) +
+  scale_colour_viridis(direction = -1, discrete = T, option = "C")+
+    labs(title = "Errors by 5 error types and week"),
+ncol=1)
+```
+
+# 6.  Conclusion and Further improvement 
+
+During this project we wants to introduce a feature that indicates the occupancy of each train in its data feeds, a system that accurately predicts the occupancy level of a train in the near future can have positive implications as the capacity of that train could be adapted, if possible, according to these predictions. This results on the one hand in a decreased probability of crowdy trains, thus an increase
+in the quality of service. On the other hand, a decrease in operational costs can be realized by reducing the capacity of trains that are expected to have a low occupancy. 
+
+We faced many challenges in the implementation process, such as NA value caused by multiple features, lack of timely available data, including price adjustment data, etc.
+
+While preliminary results on a limited dataset conclude that the models do not yet perform sufficiently well, we are convinced that with further research and a larger amount of data, our predictive model will be able to achieve higher predictive performances.
+
+
